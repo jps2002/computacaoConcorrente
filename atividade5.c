@@ -14,7 +14,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 
-#define ARRAYSIZE 100
+#define ARRAYSIZE 1000
 #define NUMTHREADS 2
 
 // modelagem de dados
