@@ -56,7 +56,7 @@ int main(int argc, char* argv[])
 
     if (argc < 4) // args são dimensão e número de threads
     {
-        printf("Digite: %s <dimensão da matriz 1> <dimensão da matriz 2> <número de threads>\n", argv[0]);
+        printf("Error: digite: %s <dimensão da matriz 1> <dimensão da matriz 2> <número de threads>\n", argv[0]);
         return 1;
     }
     dimensaoMatriz1[1] = dimensaoMatriz1[0] = atoi(argv[1]);
@@ -67,12 +67,21 @@ int main(int argc, char* argv[])
 
     numThreads = atoi(argv[3]);
 
+    // Estabalecer condição para multiplicação de matrizes: nº de colunas da 1ª matriz deve ser igual ao número de linhas da 2ª matriz
+    if (dimensaoMatriz1[1] != dimensaoMatriz2[0])
+    {
+        printf("Error: o número de colunas da primeira matriz deve ser igual ao número de linhas da segunda matriz para que seja possível multiplicação.\n");
+        printf("Nesse caso de matrizes quadradas, portanto, as dimensões das matrizes devem ser iguais.\n");
+        return 1;
+    }
+
     // TODO: Estabelecer limite do número de threads
     int maxNumThreads = dimensaoMatriz1[0] * dimensaoMatriz2[1];
     if (numThreads > maxNumThreads) 
     {
         numThreads = maxNumThreads;
     } 
+
 
     // 2º - Alocação de memória para as estruturas de dados
 
@@ -179,6 +188,10 @@ int main(int argc, char* argv[])
             
             valor = produtoInterno(linhaMatriz1, colunaMatriz2, dimensaoMatriz1[1]);
             saidaSequencial[linha * dimensaoMatrizSaida[1] + coluna] = valor;
+
+            // desalocar os vetores já utilizados
+            free(linhaMatriz1);
+            free(colunaMatriz2);
         }
     }
 
@@ -339,6 +352,10 @@ void* tarefa (void *arg)
 
             valor = produtoInterno(linhaMatriz1, colunaMatriz2, args->dimensaoMatriz1[1]);
             matrizSaida[linha * args->dimensaoMatrizSaida[1] + coluna] = valor;
+            
+            // desalocar os vetores já utilizados
+            free(linhaMatriz1);
+            free(colunaMatriz2);
         }
         
     }
