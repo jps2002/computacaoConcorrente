@@ -89,6 +89,19 @@ int main(int argc, char* argv[])
     char printable_ip[INET6_ADDRSTRLEN]; // representa uma versão string do ip do cliente
     struct sockaddr_storage client_adrress; // guarda as informações de endereços do cliente
 
+    int *thread_ids[NUM_THREADS]; // representa os ponteiros para os ids locais das threads no sistema(argumento das threads)
+
+    // Inicializar argumentos para as threads
+    for (int thread = 0; thread < NUM_THREADS; thread++) 
+    {
+        if (!(thread_ids[thread] = malloc(sizeof(int)))) 
+        {
+            pthread_exit(NULL); 
+            return 1;
+        }
+        *thread_ids[thread] = thread+1;
+    }
+
     // Criar lista para guardar soquetes ativos de cliente
     client_sockets_list = createList();
 
@@ -96,7 +109,7 @@ int main(int argc, char* argv[])
     int i = 0;
     for (i = 0; i < NUM_THREADS; i++)
     {
-        pthread_create(&thread_pool[i], NULL, thread_task, &i);
+        pthread_create(&thread_pool[i], NULL, thread_task, (void*) thread_ids[i]);
     }
     printf("Threads for communication with clients created\n");
 
