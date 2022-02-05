@@ -6,6 +6,16 @@
    Ouvimos cada cliente em uma thread diferente a fim de aumentar a quantidade de clientes que podem utilizar  simultaneamente o serviço de chat.
 */
 
+
+/*
+    USO: 
+    --> CHAMADA: Digite ./server <número de threads> no seu terminal
+    --> FINALIZAR EXECUÇÃO: Pressione CTRL + C para suspender execução
+    OBS: o número de threads corresponde ao número máximo de conexões simultâneas que nosso servidor consegue atender simultaneamente
+         Se o número de conexões for maior do que esse limite, a conexão fica na fila para entrar na sala de chat.
+         O servidor envia uma mensagem "you have entered the chat room" quando uma thread atende a uma conexão e permite que ela envie mensagem na sala de chat
+*/
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -21,6 +31,8 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include "data.h"
+#include <time.h>
+#include "timer.h"
 
 // Constantes Globais
 
@@ -28,18 +40,16 @@
 #define BACKLOG 10  // representa  quantas conexões a fila de conexões vai suportar
 #define SOCKETERROR (-1)
 #define MAX_BUFFER_SIZE 4096 // representa um tamanho máximo de uma mensagem lida ou enviada
-#define NUM_THREADS 20 // representa o tamanho da pool de threads a serem criadas
-#define MAX_NUM_MESSAGE 1000
 #define END_COMUNICATION_CODE "end"
 #define SEND_ERROR_CODE -1
 
 // Variáveis Globais
     // Relacionadas ao multithreading
-pthread_t thread_pool[NUM_THREADS]; // representa o id no sistema das threads criadas para ler mensagens dos clientes
+int NUM_THREADS; // indica o número de threads a serem criadas e consequentemente o número máximo de conexões simultâneas ativas no servidor
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;  
-pthread_cond_t condition = PTHREAD_COND_INITIALIZER;
+pthread_cond_t condition = PTHREAD_COND_INITIALIZER; // representa a sincronização condicional que sinaliza às threads a inserção de uma nova tarefa na fila de tarefas 
 
-// Variáveis globais compartilhadas entre threads
+    // Variáveis globais compartilhadas entre threads
 linkedList* client_sockets_list; // lista de file descriptors de soquetes ativos em que há conexão com cliente, funcionando como uma lista de clientes ativos
 
 // Protótipo de Funções
@@ -49,118 +59,30 @@ void sigchld_handler(int s);
 void *get_in_addr(struct sockaddr *sa);
 int get_socket(void);
 
-    // Funções relacionadas ao domínio de lidar com conexões e que lidam com multithreading 
-        // funções das threads
+    // Funções relacionadas ao domínio(chat) e multithreading 
+        // Tarefa passada para threads: responsável pelo acesso à fila de tarefas
 void* thread_task(void* arg);
+        // Funções chamadas pelas threads e que implementam funcionalidades do domínio(serviço de chat em grupo)
 void* handle_connection(void* client_socket_p);
 void* handle_connection2(void* client_socket_p);
 int send_message(int sockfd, char* message);
 
-void* handle_connection2(void* client_socket_p)
-{
-    int client_socket = *(int*)client_socket_p; // file descriptor do soquete em que há conexão com cliente
-    char buffer[MAX_BUFFER_SIZE]; // buffer para mensagens recebidas
-    size_t bytes_read; // número de bytes recebido
-
-    printf("Initializing interaction with client socket %d.\n", client_socket);
-    fflush(stdout);
-
-    // Ouvir por mensagens do cliente recebidas no soquete
-    while (1)
-    {
-        // Limpar buffer antes de uso
-        memset(buffer, 0, MAX_BUFFER_SIZE);
-
-        // Ler mensagem do enviada pelo cliente
-        bytes_read = read(client_socket, buffer, sizeof(buffer));
-
-        // Caso houve erros de leitura ou desconexão: retornar
-        if (bytes_read == -1) // erro de leitura
-        {
-            perror("server: read()\n");
-            break;
-        }
-        else if(bytes_read == 0) // erro de conexão
-        {
-            printf("server: client on socket %d has disconnected.\n", client_socket);
-            
-            // remover cliente da lista de conexões ativas
-            pthread_mutex_lock(&lock);
-            removeList(client_socket, client_sockets_list);
-            close(client_socket);
-            pthread_mutex_unlock(&lock);
-
-            break;
-        }
-
-        // Caso tudo certo: imprimir a mensagem recebida
-        buffer[strlen(buffer)] = '\0';
-        printf("Recieved and read %ld bytes from client socket %d\n", bytes_read, client_socket);
-        printf("MESSAGE FROM CLIENT %d: \"%s\"\n", client_socket, buffer);
-        
-        // Se é uma mensagem de fim de conexão("end"): finalizar conexão
-        if (strcmp(END_COMUNICATION_CODE, buffer) == 0)
-        {
-            printf("Closing connection with client socket %d\n", client_socket); 
-
-            // remover da lista de clientes ativos
-            pthread_mutex_lock(&lock);
-            removeList(client_socket, client_sockets_list);
-            close(client_socket);
-            pthread_mutex_unlock(&lock);
-            break;
-        }
-
-        pthread_mutex_lock(&lock);
-        // Se há conexões ativas: reenviar a mensagem recebida para elas.
-        if (client_sockets_list->head)
-        {
-            char message_to_be_sent[MAX_BUFFER_SIZE]; // mensagem a ser enviada aos clientes 
-            memset(message_to_be_sent, 0, MAX_BUFFER_SIZE);
-            
-            // Percorrer a lista de conexões ativas
-            nodeFromList* current_node = client_sockets_list->head;
-            while(current_node)
-            {
-                int client = current_node->client_socket;
-
-                if (client != client_socket)
-                {
-                   send_message(client, buffer);
-                   printf("Fowarding recieved message from client %d to client socket %d\n", client_socket, client);
-                }
-                
-                current_node = current_node->next_node;
-            } 
-        }    
-        pthread_mutex_unlock(&lock);
-    }
-    return NULL;
-}
-
-/**
- * @brief Envia message para soquete sockfd.
- * 
- * @param sockfd soquete para o qual a mensagem deve ser enviada 
- * @param message a mensagem a ser enviada
- * @return error code,se falhar; ou número de bytes enviados, se enviado com sucesso.
- */
-int send_message(int sockfd, char* message)
-{
-    int number_bytes = strlen(message); // number of bytes in passed message
-    printf("\"%s\" containing %d bytes will be sent to client socket %d.\n", message, number_bytes, sockfd);
-    if (write(sockfd, message , number_bytes) != number_bytes)
-    {
-        perror("error(client): send()");
-        return SEND_ERROR_CODE;
-    }
-
-    return number_bytes;
-}
-
 // Função Main
 int main(int argc, char* argv[])
 {
+
+    // Ler entrada o usuário e obter número de threads desejado
+    if(argc != 2) 
+    {
+        printf("Usage error: ./server <numeroDeConexoesSimultaneasPermitidas>\n");
+        return 1;
+    }
+    NUM_THREADS = atoi(argv[1]);
+
+    pthread_t thread_pool[NUM_THREADS]; // representa o id no sistema das threads criadas para ler mensagens dos clientes
+    double time_start = 0.0;
+    double time_done = 0.0;
+    
     // Ouvir em server_socket por novas conexões e lidar com essas conexões nos soquetes client_socket
     int server_socket; // representa o handler(file descriptor) do soquete em que o servidor vai esperar conexões
     int client_socket; // representa o handler(file descriptor) do soquete em que haverá a conexão cliente-servidor
@@ -219,6 +141,10 @@ int main(int argc, char* argv[])
         pthread_mutex_unlock(&lock);
 
     }
+
+    // Desalocar memória utilizada
+    pthread_mutex_destroy(&lock);
+    pthread_cond_destroy(&condition);
     return 0;
 }   
 
@@ -243,7 +169,6 @@ void *get_in_addr(struct sockaddr *sa)
 
     return &(((struct sockaddr_in6 *)sa)->sin6_addr);
 }
-
 
 // Retorna um soquete para o servidor
 int get_socket(void)
@@ -310,7 +235,7 @@ int get_socket(void)
 
 /**
  * @brief Tarefa das threads: espera por uma tarefa estar disponível e chama as funções necessárias para executá-la.
- * Uma tarefa disponível é um novo soquete de cliente que precisa ter sua conexão atendida, 
+ * Uma tarefa disponível é um novo soquete de cliente que precisa ter sua conexão atendida.
  * 
  * @param arg id da thread
  * @return void* 
@@ -318,14 +243,18 @@ int get_socket(void)
 void* thread_task(void* arg)
 {
     int thread_id = *(int*) arg;
+
     while (1)
     {
         int* client_socket;
-        pthread_mutex_lock(&lock);
+
+        // retirar tarefa da fila compartilhada de tarefas(seção crítica)
+        pthread_mutex_lock(&lock); 
+
         if((client_socket = dequeue())  == NULL)
         {
-            pthread_cond_wait(&condition, &lock);
-            client_socket = dequeue();
+            pthread_cond_wait(&condition, &lock); // esperar por uma nova tarefa ser adicionada na fila
+            client_socket = dequeue(); // ler tarefa da fila
         }
         pthread_mutex_unlock(&lock);
 
@@ -339,6 +268,16 @@ void* thread_task(void* arg)
     }
 }
 
+/**
+ * @brief Função Inicial do Servidor: Receber de clientes pedidos de envio de arquivos e enviá-los.
+ * 
+ * Nessa versão não é utilizada, mas em futuras versões pode ser modificada e servir de inspiração para envio de mensagens como arquivos jsons. 
+ * 
+ * @param client_socket_p é o soquete onde se deve ouvir por pedidos de clientes
+ * @return void* 
+ * 
+ * Inspirada nos exemplos do Professor Jacob Sorber
+ */
 void* handle_connection(void* client_socket_p)
 { 
     int client_socket = *(int*)client_socket_p;
@@ -396,4 +335,145 @@ void* handle_connection(void* client_socket_p)
     printf("Closing connection\n"); 
 
     return NULL;
+}
+
+/**
+ * @brief Ouve no soquete passado por mensagens do cliente e as reenviam para outros clientes ativos presentes na lista compartilhada de clientes ativos
+ * 
+ * @param client_socket_p é o soquete de cliente onde se deve escutar
+ * @return void* NULL 
+ */
+void* handle_connection2(void* client_socket_p)
+{
+    int client_socket = *(int*)client_socket_p; // file descriptor do soquete em que há conexão com cliente
+    char buffer[MAX_BUFFER_SIZE]; // buffer para mensagens recebidas
+    size_t bytes_read; // número de bytes recebido
+
+    // Limpar buffer antes de uso
+    memset(buffer, 0, MAX_BUFFER_SIZE);
+
+    char* freeToGoMessage = "server: you have entered the chat room.";
+    send_message(client_socket, freeToGoMessage);
+
+    printf("Initializing interaction with client socket %d.\n", client_socket);
+    fflush(stdout);
+
+    // Ouvir por mensagens do cliente recebidas no soquete
+    while (1)
+    {
+        // Limpar buffer antes de uso
+        memset(buffer, 0, MAX_BUFFER_SIZE);
+
+        double time_start = 0.0, time_done = 0.0; // para testar tempo de execução
+        double time_beforeReading = 0.0, time_afterFowarding = 0.0;
+        double time_fromReadingToFowarding = 0.0; double time_buffer;
+
+        time_start = (double) clock () / CLOCKS_PER_SEC;
+        time_beforeReading = (double) clock () / CLOCKS_PER_SEC;
+
+        // Ler mensagem do enviada pelo cliente
+        bytes_read = read(client_socket, buffer, sizeof(buffer));
+
+        time_done = (double) clock () / CLOCKS_PER_SEC;
+
+        // Caso houve erros de leitura ou desconexão: retornar
+        if (bytes_read == -1) // erro de leitura
+        {
+            perror("server: read()\n");
+            break;
+        }
+        else if(bytes_read == 0) // erro de conexão
+        {
+            printf("server: client on socket %d has disconnected.\n", client_socket);
+            
+            // remover cliente da lista de conexões ativas
+            pthread_mutex_lock(&lock);
+            removeList(client_socket, client_sockets_list);
+            close(client_socket);
+            pthread_mutex_unlock(&lock);
+
+            break;
+        }
+
+        // Caso tudo certo: imprimir a mensagem recebida
+        buffer[strlen(buffer)] = '\0';
+        printf("RECIEVED NEW MESSAGE:\n");
+        printf("-->Time took to read: %lf \n", time_done-time_start);
+        printf("-->Sender: client socket %d\n", client_socket);
+        printf("-->Size: %ld bytes\n", bytes_read);
+        printf("-->Content: \"%s\"\n", buffer);
+
+        
+        // Se é uma mensagem de fim de conexão("end"): finalizar conexão
+        if (strcmp(END_COMUNICATION_CODE, buffer) == 0)
+        {
+            printf("Closing connection with client socket %d\n", client_socket); 
+
+            // remover da lista de clientes ativos
+            pthread_mutex_lock(&lock);
+            removeList(client_socket, client_sockets_list);
+            close(client_socket);
+            pthread_mutex_unlock(&lock);
+            break;
+        }
+
+        // Se há conexões ativas: reenviar a mensagem recebida para elas.
+        pthread_mutex_lock(&lock);
+        nodeFromList* current_node = client_sockets_list->head;
+        if (current_node)
+        {
+            // Limpar buffer antes de usar
+            char message_to_be_sent[MAX_BUFFER_SIZE]; // mensagem a ser enviada aos clientes 
+            memset(message_to_be_sent, 0, MAX_BUFFER_SIZE);
+
+            printf("FOWARDING MESSAGE\n");
+            printf("-->Original Message Sender: client socket %d\n", client_socket);
+            printf("-->Fowarding to: \n");
+
+            time_start = (double) clock () / CLOCKS_PER_SEC;
+            
+            // Percorrer a lista de conexões ativas
+            while(current_node)
+            {
+                int client = current_node->client_socket;
+
+                if (client != client_socket)
+                {
+                   send_message(client, buffer);
+                   printf("---->client socket %d\n", client);
+                }
+                
+                current_node = current_node->next_node;
+            } 
+
+            time_done = (double) clock () / CLOCKS_PER_SEC;
+            time_afterFowarding = (double) clock () / CLOCKS_PER_SEC;
+            printf("--> Time took to foward message to all active clients:%lf\n", time_done- time_start);
+            printf("--> Time took from recieving message to fowarding it to all active clients:%lf\n", time_afterFowarding - time_beforeReading);
+        }    
+        pthread_mutex_unlock(&lock);
+
+
+    }
+    return NULL;
+}
+
+/**
+ * @brief Envia message para soquete sockfd.
+ * 
+ * @param sockfd soquete para o qual a mensagem deve ser enviada 
+ * @param message a mensagem a ser enviada
+ * @return error code, se falhar; ou número de bytes enviados, se enviado com sucesso.
+ */
+int send_message(int sockfd, char* message)
+{
+    int number_bytes = strlen(message); // representa o número de bytes a serem enviados
+    // printf("\"%s\" containing %d bytes will be sent to client socket %d.\n", message, number_bytes, sockfd); // log do envio
+    if (write(sockfd, message , number_bytes) != number_bytes) 
+    {
+        perror("error(client): send()");
+        return SEND_ERROR_CODE;
+    }
+
+    return number_bytes;
 }
