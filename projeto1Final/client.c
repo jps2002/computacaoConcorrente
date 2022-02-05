@@ -5,8 +5,16 @@
    mensagens de/para outros clientes conectados ao mesmo servidor.
 */
 
-// Usage: ./client {hostname}
-// Exemplo de uso: se seu computador se chama teste123 use ./client teste123 para abrir a aplicação/terminal de chat
+/*
+    USO: 
+    --> CHAMADA: Digite ./client <nome do host> no seu terminal
+        --> Exemplo de uso: se seu computador se chama teste123 use ./client teste123 para abrir a aplicação/terminal de chat
+    --> FINALIZAR EXECUÇÃO: 
+        --> Pressione CTRL + C para suspender execução a qualquer momento
+        --> Envie a mensagem "end" no chat para suspender conexão e posterior execução
+
+*/
+
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +27,7 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <pthread.h>
+#include "messages.h"
 
 #define SEND_ERROR_CODE -1
 #define PORT "3490"     // porta com a qual se deve conectar no servidor
@@ -27,13 +36,23 @@
 #define MAX_USERNAME_SIZE 20 // tamanho máximo de caracteres em um nome de usuário
 #define NUM_THREADS 2
 #define END_CONECTION_CODE "end"
+#define LOGGED_IN_CODE "server: you have entered the chat room."
 
-// Variáveis Globais
+// Variáveis Globais 
     // Relacionadas ao multithreading
-pthread_t threadsId[NUM_THREADS]; // representa o id no sistema das threads criadas para ler mensagens dos clientes
-    
+
     /* OBS: atualmente, nessa versão, apenas uma thread será utilizada( uma para ler mensagens enviadas pelo servidor) [
-        apesar de haver espaço para criação de mais */
+       apesar de haver espaço para criação de mais */
+pthread_t threadsId[NUM_THREADS]; // representa o id no sistema das threads criadas para ler mensagens dos clientes
+
+    /* CONDIÇÃO DE SINCRONIZAÇÃO: A thread principal somente pode ler mensagens da entrada do usuário 
+       após a thread de leitura ter recebido mensagem de liberação do servidor. */
+pthread_cond_t entrouNaConversa = PTHREAD_COND_INITIALIZER; // sincronização condicional de threads
+pthread_mutex_t lockAcessoEstaLogado = PTHREAD_MUTEX_INITIALIZER;  // mutex auxiliar da sincronização condicional
+int estaLogado = 0; // variável de estado relacionada à sincronização condicional
+
+    /* OBS: atualmente, nessa versão, apenas uma thread será utilizada( uma para ler mensagens enviadas pelo servidor) [
+       apesar de haver espaço para criação de mais */
 
 // Protótipo de funções
 
@@ -69,13 +88,27 @@ int main(int argc, char *argv[])
     sockfd = setup_connection(hostname);
     
     // Ler nome de usuário 
-    printf("Usage tip: if you want to close this chat just send \"end\" or press CTRL+C\n");
-    printf("Now please, enter a nickname up to 19 characters: ");
+    printf("Usage:\n"); 
+    printf("--> Write your messages after \"Send: \" prompt\n");
+    printf("--> For closing this chat window: send \"end\" as message or press CTRL+C at any given point\n");
+    printf("--> Only start writing messages after recieving \"you have entered the chat room\" message from server\n\n");
+    printf("Please, enter a nickname(max of 19 chars): ");
     scanf("%s", user_name);
     user_name[strlen(user_name)] = 0; // retirar newline 
     
     // Criar thread para receber mensagens 
     pthread_create(&threadsId[0], NULL, thread_task_read, &sockfd);
+
+    // Garantir que o cliente está logado em uma sala de chat antes de poder enviar qualquer mensagem
+    pthread_mutex_lock(&lockAcessoEstaLogado);
+    if(estaLogado == 0)
+    {
+        printf("Waiting for permission to enter chat...\n");
+        pthread_cond_wait(&entrouNaConversa, &lockAcessoEstaLogado);
+        printf("You have successfully entered the chat...\n");
+    }
+    pthread_mutex_unlock(&lockAcessoEstaLogado);
+
 
     // Mandar mensagem de que entrou no chat a outros usuários
     send_hasEnteredChat_message(sockfd, user_name);
@@ -86,7 +119,6 @@ int main(int argc, char *argv[])
         // limpar buffers antes de usar
         memset(buffer, 0, MAXDATASIZE);
         memset(final_message, 0, MAX_BUFFER_SIZE+MAX_USERNAME_SIZE+2);
-        
 
         // ler da entrada do usuário o corpo desejado da mensagem para envio
         printf("Send message: ");
@@ -102,10 +134,9 @@ int main(int argc, char *argv[])
         strcat(final_message, user_name); // adicionar marcador de usuário à mensagem final
         strcat(final_message, ": ");
         strcat(final_message, buffer); // adicionar corpo da mensagem à mensagem final
-        
+            
         // enviar a mensagem final
         send_message(sockfd, final_message);
-
 
         // verificar se foi uma mensagem de finalizar conexão
         if (strcmp(buffer, END_CONECTION_CODE) == 0)
@@ -113,14 +144,12 @@ int main(int argc, char *argv[])
             printf("\nClosing client connection\n");
             close(sockfd);
             break;
-        }
-       
+        }       
     }
-
     return 0;
 }
 
-// Functions definitions
+// Definição de funções 
 
 void *get_in_addr(struct sockaddr *sa)
 {
@@ -164,7 +193,7 @@ int send_message(int sockfd, char* message)
     if (number_bytes == 0) return 0; // se a mensagem for vazia, fazer nada
 
     // log do envio para propósitos de teste
-    printf("LOG --> \"%s\" containing %d bytes will be sent to client socket %d.\n", message, number_bytes, sockfd);
+    // printf("LOG --> \"%s\" containing %d bytes will be sent to client socket %d.\n", message, number_bytes, sockfd);
 
     // enviar mensagem no soquete sockfd
     if (write(sockfd, message , number_bytes) != number_bytes)
@@ -259,11 +288,26 @@ void* thread_task_read(void* arg)
             printf("Press ctrl-c to kill chat terminal\n");
             break;
         }
+        buffer[strlen(buffer)] = '\0';  
+        
 
-        // Caso tudo certo: imprimir a mensagem recebida
-        buffer[strlen(buffer)] = '\0';
-        // printf("Recieved and read %ld bytes from socket %d\n", bytes_read, sockfd);
-        printf("\nNEW  MESSAGE(%d) FROM %s\n", sockfd, buffer);
+        // Caso tudo certo: verificar se a mensagem recebida é sinalizadora de entrada na conversa em grupo
+        // Se for mensagem sinalizadora: não a imprimir, mas apenas sinalizar que já se pode ler da entrada e enviar mensagens do usuário ao servidor 
+        if (strcmp(LOGGED_IN_CODE, buffer) == 0)
+        {
+            pthread_mutex_lock(&lockAcessoEstaLogado);
+            estaLogado = 1;
+            pthread_cond_signal(&entrouNaConversa);
+            pthread_mutex_unlock(&lockAcessoEstaLogado);
+        }
+        else // Se não for mensagem sinalizadora: imprimir a mensagem recebida
+        {
+            /* Log de recebimento para propósitos de teste: 
+            printf("Recieved and read %ld bytes from socket %d\n", bytes_read, sockfd); */
+            printf("\nFROM %s\n", buffer);
+            printf("Send: "); 
+        }     
+
         fflush(stdout);         
     }
 
